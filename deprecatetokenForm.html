@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+  </head>
+  <body>
+    
+  </body>
+</html>
+<!DOCTYPE html>
+<html>
+  <body style="font-family:Arial;margin:30px;">
+    <h3>Enter your access token:</h3>
+    <input id="token" type="text" style="padding:4px;">
+    <button onclick="verify()">Submit</button>
+    <p id="msg"></p>
+    <div id="schedule"></div>
+
+    <script>
+      function verify() {
+        const t = document.getElementById("token").value.trim();
+        google.script.run.withSuccessHandler(showResult).checkToken(t);
+      }
+
+      function showResult(result) {
+        const msg = document.getElementById("msg");
+        const schedDiv = document.getElementById("schedule");
+        schedDiv.innerHTML = "";
+        if (!result) {
+          msg.textContent = "❌ Invalid token.";
+          return;
+        }
+        msg.textContent = "✅ Token accepted!";
+        const table = document.createElement("table");
+        table.border = "1";
+        result.forEach(r => {
+          const tr = document.createElement("tr");
+          r.forEach(c => {
+            const td = document.createElement("td");
+            td.textContent = c;
+            tr.appendChild(td);
+          });
+          table.appendChild(tr);
+        });
+        schedDiv.appendChild(table);
+      }
+    </script>
+  </body>
+</html>
