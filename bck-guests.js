@@ -3,12 +3,14 @@
  * bck-guests.js
  * Chevra Kadisha Guests Form handler
  * -----------------------------------------------------------------
- * Version: 2.2.1 
- * Last updated: 2025-03-26
- * * CHANGELOG v2.2.0:
+ * Version: 2.2.2 
+ * Last updated: 2025-03-27
+ * v2.2.0:
  * - Initial implementation of Selection Form based on members form code.
- * * CHANGELOG v2.2.1:
+ * v2.2.1:
  * - Utilizes new email template solution 
+ * 2.2.2:
+ * - All DataObject fields are available for mail merge from template 
  * -----------------------------------------------------------------
  */
 
@@ -261,26 +263,17 @@ function isFormUpdated(dataObject) {
 }
 
 /**
- * Sends a confirmation email to the user with specific instructions based on their approval status.
- * Updated to use new DB Field Names: PRIMARY_EMAIL, FIRST_NAME, LAST_NAME, ADDRESS.
- * * @param {Object} dataObject - The mapped data object.
- * @param {boolean} [preApproved=false] - Whether the user was automatically approved.
- */
-/**
- * Sends confirmation email using local Email sheet templates.
- * @param {Object} dataObject - Mapped form data.
- * @param {boolean} preApproved - Approval status.
+ * Sends a confirmation email to the user with specific instructions based on status.
+ * Dynamically maps all dataObject keys to [TAGS].
  */
 function sendFormConfirmationNotification(sheetInputs, dataObject, preApproved = false) {
+  // Use PRIMARY_EMAIL with EMAIL_ADDRESS as a fallback
   let recipientEmail = dataObject.PRIMARY_EMAIL || dataObject.EMAIL_ADDRESS;
   
-  const firstName = dataObject.FIRST_NAME || "";
-  const lastName = dataObject.LAST_NAME || "";
-  const address = dataObject.ADDRESS || "";
-
-  if (!recipientEmail || !firstName || !lastName || !address) {
+  // Validation: Keep your existing requirements for mandatory fields
+  if (!recipientEmail || !dataObject.FIRST_NAME || !dataObject.LAST_NAME || !dataObject.ADDRESS) {
     Logger.log('Missing notification fields: Email=%s, Name=%s %s, Addr=%s', 
-      recipientEmail, firstName, lastName, address);
+      recipientEmail, dataObject.FIRST_NAME, dataObject.LAST_NAME, dataObject.ADDRESS);
     return;
   }
 
@@ -294,20 +287,22 @@ function sendFormConfirmationNotification(sheetInputs, dataObject, preApproved =
     return;
   }
 
-  // Replacements
-  const replacements = {
-    '[firstName]': firstName,
-    '[lastName]': lastName
+  /**
+   * Dynamic Case-Insensitive Replacement
+   */
+  const replaceText = (text) => {
+    if (!text) return '';
+    return text.replace(/\[([^\]]+)\]/g, (match, p1) => {
+      const key = p1.toUpperCase();
+      return dataObject.hasOwnProperty(key) ? dataObject[key] : match;
+    });
   };
-  const replaceText = (text) => Object.entries(replacements).reduce((str, [k, v]) => 
-    str ? str.replace(new RegExp(k.replace(/[[\]]/g, '\\$&'), 'g'), v) : '', text || '');
 
   const subject = replaceText(template.subject);
   const bodyLines = [];
   for (let i = 1; i <= 30; i++) {
-    const lineKey = `line${i}`;
-    const lineText = replaceText(template[lineKey]);
-    if (lineText.trim()) bodyLines.push(lineText);
+    const lineText = replaceText(template[`line${i}`]);
+    if (lineText && lineText.trim()) bodyLines.push(lineText);
   }
   const body = bodyLines.join('\n\n');
 
@@ -315,35 +310,21 @@ function sendFormConfirmationNotification(sheetInputs, dataObject, preApproved =
     MailApp.sendEmail(recipientEmail, subject, body);
     Logger.log(`Guest notification sent to ${recipientEmail} (${preApproved ? 'Approved' : 'Follow-up'})`);
   } catch (error) {
-    Logger.log(`Guest email ERROR: ${error}`);
+    Logger.log(`Guest email ERROR: ${error.toString()}`);
   }
 }
 
-
 /**
- * Sends a notification email to the BCK admin that a new user has been added.
- * * @param {Object} dataObject - The mapped data object.
- * @param {boolean} [preApproved=false] - Whether the user was automatically approved.
- */
-
-// For now hard codes the notification email address
-const notificationEmailAddress = "marlalshapiro@gmail.com"
-// const notificationEmailAddress = "boulder.chevra@gmail.com"
-
-/**
- * Sends admin notification using local templates.
- * @param {Object} dataObject - Form data.
- * @param {boolean} preApproved - Status.
+ * Sends a notification email to the admin that a new user has been added.
+ * Supports all dataObject keys as [TAGS] plus [RECIPIENTEMAIL].
  */
 function sendFormUpdateNotification(sheetInputs, dataObject, preApproved = false) {
-  const recipientEmail = dataObject.PRIMARY_EMAIL || dataObject.EMAIL_ADDRESS;
-  const category = dataObject.CATEGORY || "";
-  const firstName = dataObject.FIRST_NAME || "";
-  const lastName = dataObject.LAST_NAME || "";
-  const phone = dataObject.PRIMARY_MOBILE_PHONE || "";
+  const adminEmail = "marlalshapiro@gmail.com";
+  const userEmail = dataObject.PRIMARY_EMAIL || dataObject.EMAIL_ADDRESS || "N/A";
 
-  if (!category || !recipientEmail || !firstName || !lastName) {
-    Logger.log('Admin notification missing fields.');
+  // Validation: Ensure we have the basics
+  if (!dataObject.CATEGORY || !dataObject.FIRST_NAME || !dataObject.LAST_NAME) {
+    Logger.log('Admin notification missing fields (Category or Name).');
     return;
   }
 
@@ -356,29 +337,34 @@ function sendFormUpdateNotification(sheetInputs, dataObject, preApproved = false
     return;
   }
 
-  const replacements = {
-    '[category]': category,
-    '[firstName]': firstName,
-    '[lastName]': lastName,
-    '[recipientEmail]': recipientEmail,
-    '[phone]': phone
+  /**
+   * Dynamic Case-Insensitive Replacement
+   */
+  const replaceText = (text) => {
+    if (!text) return '';
+    return text.replace(/\[([^\]]+)\]/g, (match, p1) => {
+      const key = p1.toUpperCase();
+      
+      // Special mapping for the user's email
+      if (key === "RECIPIENTEMAIL") return userEmail;
+      
+      // Map everything else to dataObject keys (CATEGORY, PHONE, etc.)
+      return dataObject.hasOwnProperty(key) ? dataObject[key] : match;
+    });
   };
-  const replaceText = (text) => Object.entries(replacements).reduce((str, [k, v]) => 
-    str ? str.replace(new RegExp(k.replace(/[[\]]/g, '\\$&'), 'g'), v) : '', text || '');
 
   const subject = replaceText(template.subject);
   const bodyLines = [];
   for (let i = 1; i <= 30; i++) {
-    const lineKey = `line${i}`;
-    const lineText = replaceText(template[lineKey]);
-    if (lineText.trim()) bodyLines.push(lineText);
+    const lineText = replaceText(template[`line${i}`]);
+    if (lineText && lineText.trim()) bodyLines.push(lineText);
   }
   const body = bodyLines.join('\n\n');
 
   try {
-    MailApp.sendEmail("marlalshapiro@gmail.com", subject, body); // Your hardcoded admin email
-    Logger.log(`Admin notification sent (${preApproved ? 'Approved' : 'Pending'})`);
+    MailApp.sendEmail(adminEmail, subject, body);
+    Logger.log(`Admin notification sent for ${dataObject.LAST_NAME} (${preApproved ? 'Approved' : 'Pending'})`);
   } catch (error) {
-    Logger.log(`Admin email ERROR: ${error}`);
+    Logger.log(`Admin email ERROR: ${error.toString()}`);
   }
 }
