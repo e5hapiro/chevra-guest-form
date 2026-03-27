@@ -3,10 +3,12 @@
  * bck-guests.js
  * Chevra Kadisha Guests Form handler
  * -----------------------------------------------------------------
- * Version: 2.2.0 
- * Last updated: 2025-03-19
+ * Version: 2.2.1 
+ * Last updated: 2025-03-26
  * * CHANGELOG v2.2.0:
  * - Initial implementation of Selection Form based on members form code.
+ * * CHANGELOG v2.2.1:
+ * - Utilizes new email template solution 
  * -----------------------------------------------------------------
  */
 
@@ -59,60 +61,68 @@ function debugSubmission() {
   const response = processFormSubmit(eObject);
   Logger.log("Debug Submission Response: " + response);
 }
-
 /**
  * Main entry point for the 'On form submit' trigger.
  * Orchestrates dynamic data mapping, validation, database appending, and notifications.
- * * @param {GoogleAppsScript.Events.SheetsOnFormSubmit} e - The Google Form submit event object.
+ * @param {GoogleAppsScript.Events.SheetsOnFormSubmit} e - The Google Form submit event object.
  */
 function processFormSubmit(e) {
   Logger.log("Processing form submit");
-  
+
+  // Check library upfront to ensure logging and inputs are available
+  if (typeof bckLib === 'undefined') {
+    throw new Error("Required library 'bckLib' is not available.");
+  }
+
+  let sheetInputs;
   try {
+    // Initialize sheet inputs and ensure SPREADSHEET_ID matches the current context
+    sheetInputs = bckLib.getSheetInputs();
+    sheetInputs.SPREADSHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
+
     if (DEBUG) {
-      Logger.log("Capturing event data - >");
+      Logger.log("Capturing event data ->");
       Logger.log(JSON.stringify(e));
     }
 
     // Dynamic mapping converts raw form headers into standardized DB headers
+    // Note: Function name updated to match new "Guest" naming convention
     const mappedData = getMappedGuestData(e);
     const eventData = mappedData.dataObject; 
     const dbRowArray = mappedData.rowArray;
 
     if (DEBUG) console.log("Mapped Event Data:", eventData);
 
-    // Stop processing if this appears to be a profile update rather than a new guest
+    // Stop processing if this appears to be a profile update rather than a new entry
     let formUpdated = isFormUpdated(eventData);
-    if (formUpdated) return;
+    if (formUpdated) return "Update Detected: No Append";
 
     // Determine if guest meets requirements for automatic approval
     let preApproved = preApproveGuests(eventData);
     
-    // Sort into appropriate sheet based on approval status
+    // Sort into appropriate sheet based on approval status (Guest vs Pending Guest)
     const targetSheetName = preApproved ? "Guest DB" : "Pending Guest DB";
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     ss.getSheetByName(targetSheetName).appendRow(dbRowArray);
    
-    // Send email confirmation to the user
-    sendFormConfirmationNotification(eventData, preApproved);
-
-    const status = preApproved ? "Approved & Appended" : "Pending & Appended";
+    // Send email confirmation to the user - passing sheetInputs as per new logic
+    sendFormConfirmationNotification(sheetInputs, eventData, preApproved);
 
     // Send notification to BCK admin of database updates
-    sendFormUpdateNotification(eventData, preApproved);
-    
+    sendFormUpdateNotification(sheetInputs, eventData, preApproved);
+
+    const status = preApproved ? "Approved & Appended" : "Pending & Appended";
     return status;
-    
+
   } catch (err) {
     Logger.log("Error in processFormSubmit: " + err.toString());
-    // Assumes existence of a library 'bckLib' for external logging
-    if (typeof bckLib !== 'undefined') {
-      bckLib.logQCVars("Process FAILED", { errorMessage: err.toString() });
-    }
-    return "Error: " + err.toString(); // Return the error so the debugger sees it
+    
+    // Since library is checked at the top, we can call it safely here
+    bckLib.logQCVars("Process FAILED", { errorMessage: err.toString() });
+    
+    return "Error: " + err.toString(); 
   }
 }
-
 /**
  * Transforms raw form responses into a structured object and array based on a mapping table.
  * * @param {GoogleAppsScript.Events.SheetsOnFormSubmit} e - The form submit event object.
@@ -256,94 +266,59 @@ function isFormUpdated(dataObject) {
  * * @param {Object} dataObject - The mapped data object.
  * @param {boolean} [preApproved=false] - Whether the user was automatically approved.
  */
-function sendFormConfirmationNotification(dataObject, preApproved = false) {
+/**
+ * Sends confirmation email using local Email sheet templates.
+ * @param {Object} dataObject - Mapped form data.
+ * @param {boolean} preApproved - Approval status.
+ */
+function sendFormConfirmationNotification(sheetInputs, dataObject, preApproved = false) {
+  let recipientEmail = dataObject.PRIMARY_EMAIL || dataObject.EMAIL_ADDRESS;
   
-  // 1. EMAIL VALIDATION & EXTRACTION
-  // The new field list specifies "PRIMARY EMAIL" (mapped as PRIMARY_EMAIL)
-  let recipientEmail = dataObject.PRIMARY_EMAIL;
-  
-  // Safety fallback if the mapping varies or uses the system timestamped email
-  if (!recipientEmail || recipientEmail.toLowerCase().includes("same as above")) {
-    recipientEmail = dataObject.EMAIL_ADDRESS; 
-  }
-
-  // 2. DATA EXTRACTION
   const firstName = dataObject.FIRST_NAME || "";
   const lastName = dataObject.LAST_NAME || "";
   const address = dataObject.ADDRESS || "";
 
-  // 3. VALIDATION CHECK
   if (!recipientEmail || !firstName || !lastName || !address) {
-    Logger.log('Error: Missing required notification fields. ' + 
-               'Email: ' + recipientEmail + ', Name: ' + firstName + ' ' + lastName + ', Addr: ' + address);
+    Logger.log('Missing notification fields: Email=%s, Name=%s %s, Addr=%s', 
+      recipientEmail, firstName, lastName, address);
     return;
   }
 
-  /**
-   * Generates the email subject and body for pre-approved guests.
-   * @param {Object} data - The data object passed from the parent scope.
-   */
-  function _preApprovedResponse(data) {
-    return {
-      subject: `${data.FIRST_NAME} ${data.LAST_NAME} - Approved - BCK Guest Shmira`,
-      body: `
-Dear ${data.FIRST_NAME},
-
-Thank you for signing up with BCK as a guest shmira volunteer.
-
-You will receive a separate email request to schedule your shmira. The email will include a link to a web portal where you may sign up for shmira. Please remember that this link is unique to you so please do not share it. 
-
-If you have any questions, do not hesitate to contact us by email or phone.
-
-With gratitude,
-
-Boulder Chevra Kadisha
-Phone - 303-842-5365
-Email - boulder.chevra@gmail.com`
-    };
+  // Load local templates
+  const emailTemplates = bckLib.getEmails(sheetInputs);
+  const templateKey = preApproved ? 'guest_preapproved' : 'guest_followup';
+  const template = emailTemplates.find(t => t.key === templateKey);
+  
+  if (!template) {
+    Logger.log('Template "%s" missing.', templateKey);
+    return;
   }
 
-  /**
-   * Generates the email subject and body for guests requiring follow-up.
-   * @param {Object} data - The data object passed from the parent scope.
-   */
-  function _followupResponse(data) {
-    return {
-      subject: `${data.FIRST_NAME} ${data.LAST_NAME} - Thank you for volunteering with Boulder's Chevra Chadisha - Let's talk`,
-      body: `
-Dear ${data.FIRST_NAME},
+  // Replacements
+  const replacements = {
+    '[firstName]': firstName,
+    '[lastName]': lastName
+  };
+  const replaceText = (text) => Object.entries(replacements).reduce((str, [k, v]) => 
+    str ? str.replace(new RegExp(k.replace(/[[\]]/g, '\\$&'), 'g'), v) : '', text || '');
 
-Thank you for submitting your Guest Shomerim application with the Boulder Chevra Kadisha. We need to discuss the available options with you. 
-
-Please call us at (303) 842-5365 or reply to this email with your availability to have a 15-minute conversation. 
-
-Boulder Chevra Kadisha
-Phone - 303-842-5365
-Email - boulder.chevra@gmail.com
-
-We appreciate your willingness to perform this sacred duty and look forward to speaking with you. 
-
-With gratitude,
-
-Boulder Chevra Kadisha`
-    };
+  const subject = replaceText(template.subject);
+  const bodyLines = [];
+  for (let i = 1; i <= 30; i++) {
+    const lineKey = `line${i}`;
+    const lineText = replaceText(template[lineKey]);
+    if (lineText.trim()) bodyLines.push(lineText);
   }
+  const body = bodyLines.join('\n\n');
 
-  // Select the correct content, passing dataObject into the helper functions
-  const emailData = preApproved ? _preApprovedResponse(dataObject) : _followupResponse(dataObject);
-
-  // 4. EXECUTION
   try {
-    MailApp.sendEmail({
-      to: recipientEmail,
-      subject: emailData.subject,
-      body: emailData.body
-    });
-    Logger.log(`Guest notification sent successfully to ${recipientEmail}. Status: ${preApproved ? 'Approved' : 'Follow-up'}`);
+    MailApp.sendEmail(recipientEmail, subject, body);
+    Logger.log(`Guest notification sent to ${recipientEmail} (${preApproved ? 'Approved' : 'Follow-up'})`);
   } catch (error) {
-    Logger.log(`ERROR sending notification email to ${recipientEmail}: ${error.toString()}`);
+    Logger.log(`Guest email ERROR: ${error}`);
   }
 }
+
 
 /**
  * Sends a notification email to the BCK admin that a new user has been added.
@@ -355,81 +330,55 @@ Boulder Chevra Kadisha`
 const notificationEmailAddress = "marlalshapiro@gmail.com"
 // const notificationEmailAddress = "boulder.chevra@gmail.com"
 
-function sendFormUpdateNotification(dataObject, preApproved = false) {
-  // Fallback: If user used "Same as above" in contact email, use the system-captured email
-  let recipientEmail = dataObject.EMAIL_1;
-  if (!recipientEmail || recipientEmail.toLowerCase().includes("same as above")) {
-    recipientEmail = dataObject.PRIMARY_EMAIL; 
-  }
-
+/**
+ * Sends admin notification using local templates.
+ * @param {Object} dataObject - Form data.
+ * @param {boolean} preApproved - Status.
+ */
+function sendFormUpdateNotification(sheetInputs, dataObject, preApproved = false) {
+  const recipientEmail = dataObject.PRIMARY_EMAIL || dataObject.EMAIL_ADDRESS;
   const category = dataObject.CATEGORY || "";
   const firstName = dataObject.FIRST_NAME || "";
   const lastName = dataObject.LAST_NAME || "";
   const phone = dataObject.PRIMARY_MOBILE_PHONE || "";
-  const email = dataObject.ADDRESS || "";
 
   if (!category || !recipientEmail || !firstName || !lastName) {
-    Logger.log('Error: Missing required fields (Category, Email, Name, or Address) for notification');
+    Logger.log('Admin notification missing fields.');
     return;
   }
 
-  /**
-   * Generates the email subject and body for pre-approved members.
-   * @returns {Object} {subject, body}
-   */
-  function _preApprovedResponse() {
-    return {
-      subject : `${firstName} ${lastName} - Notice of new Boulder Chevra Kadisha ${category} PREAPPROVED`,
-      body: `
-
-This message is to notify you that a new ${category} has been PRE-APPROVED and has been added to the ${category} database automatically.
-
-Category - ${category}
-Lastname - ${lastName}
-Firstname - ${firstName}
-Email - ${recipientEmail}
-Phone - ${phone}
-
-Next Steps - No further action is required.
-
-      `
-    };
+  const emailTemplates = bckLib.getEmails(sheetInputs);
+  const templateKey = preApproved ? 'admin_preapproved' : 'admin_followup';
+  const template = emailTemplates.find(t => t.key === templateKey);
+  
+  if (!template) {
+    Logger.log('Admin template "%s" missing.', templateKey);
+    return;
   }
 
+  const replacements = {
+    '[category]': category,
+    '[firstName]': firstName,
+    '[lastName]': lastName,
+    '[recipientEmail]': recipientEmail,
+    '[phone]': phone
+  };
+  const replaceText = (text) => Object.entries(replacements).reduce((str, [k, v]) => 
+    str ? str.replace(new RegExp(k.replace(/[[\]]/g, '\\$&'), 'g'), v) : '', text || '');
 
-  /**
-   * Generates the email subject and body for members requiring follow-up.
-   * @returns {Object} {subject, body}
-   */
-  function _followupResponse() {
-    return {
-      subject : `${firstName} ${lastName} - ** ACTION REQUIRED ** Notice of new Boulder Chevra Kadisha ${category} PENDING`,
-      body: `
-
-This message is to notify you that a new ${category} is PENDING approval and has yet to be added to the ${category} database.
-
-Category - ${category}
-Lastname - ${lastName}
-Firstname - ${firstName}
-Email - ${recipientEmail}
-Phone - ${phone}
-
-Next Steps - Contact the pending ${category} and then move their request from pending to approved.
-
-      `
-    };
+  const subject = replaceText(template.subject);
+  const bodyLines = [];
+  for (let i = 1; i <= 30; i++) {
+    const lineKey = `line${i}`;
+    const lineText = replaceText(template[lineKey]);
+    if (lineText.trim()) bodyLines.push(lineText);
   }
-
-  const emailData = preApproved ? _preApprovedResponse() : _followupResponse();
+  const body = bodyLines.join('\n\n');
 
   try {
-    MailApp.sendEmail({
-      to: recipientEmail,
-      subject: emailData.subject,
-      body: emailData.body
-    });
-    Logger.log(`${category} admin notification sent successfully to ${recipientEmail}.`);
+    MailApp.sendEmail("marlalshapiro@gmail.com", subject, body); // Your hardcoded admin email
+    Logger.log(`Admin notification sent (${preApproved ? 'Approved' : 'Pending'})`);
   } catch (error) {
-    Logger.log(`ERROR sending ${category} admin notification email to ${recipientEmail}: ${error.toString()}`);
+    Logger.log(`Admin email ERROR: ${error}`);
   }
 }
